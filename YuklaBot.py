@@ -46,7 +46,7 @@ class UI:
     CAPTION_VIDEO = "🎬 <b>{}</b>\n\n✨ {}: Yuklab beruvchi bot"
     CAPTION_MUSIC = "🎵 <b>{}</b>\n\n✨ {}: Yuklab beruvchi bot"
     
-    ERROR = "❌ <b>Kechirasiz, {}!</b>\n\nXatolik yuz berdi."
+    ERROR = "❌ <b>Kechirasiz, {}!</b>\n\n Xatolik yuz berdi."
     NOT_FOUND = "🔍 <b>Afsuski, hech narsa topilmadi.</b>"
 
 # --- YT-DLP SOZLAMALARI ---
@@ -61,13 +61,9 @@ def get_ydl_opts(file_base, is_audio=False):
     }
     
     if is_audio:
+        # Renderda FFmpeg muammosi bo'lmasligi uchun postprocessor'lar olib tashlandi
         opts.update({
             'format': 'bestaudio/best',
-            'postprocessors': [{
-                'key': 'FFmpegExtractAudio',
-                'preferredcodec': 'mp3',
-                'preferredquality': '192',
-            }],
         })
     else:
         opts.update({
@@ -121,7 +117,6 @@ class ProfessionalDownloader:
             await status_msg.edit_text(UI.UPLOADING, parse_mode=ParseMode.HTML)
             
             with open(file_path, 'rb') as f:
-                # Video tagiga imzo qo'shish
                 caption_text = UI.CAPTION_VIDEO.format(title, BOT_USERNAME)
                 await update.message.reply_video(
                     video=f, 
@@ -145,20 +140,27 @@ class ProfessionalDownloader:
 
         try:
             loop = asyncio.get_running_loop()
+            # Musiqa qidirish va yuklash (FFmpegsiz)
             with yt_dlp.YoutubeDL(get_ydl_opts(file_base, is_audio=True)) as ydl:
                 info = await loop.run_in_executor(None, lambda: ydl.extract_info(f"ytsearch1:{query}", download=True))
-                if not info['entries']:
+                
+                if not info or 'entries' not in info or not info['entries']:
                     await status_msg.edit_text(UI.NOT_FOUND, parse_mode=ParseMode.HTML)
                     return
                 
                 entry = info['entries'][0]
                 title = entry.get('title', 'Musiqa')
 
-            file_path = f"{file_base}.mp3"
-            if os.path.exists(file_path):
+            # Yuklangan faylni kengaytmasidan qat'iy nazar topish
+            file_path = None
+            for f in os.listdir(DOWNLOAD_DIR):
+                if f.startswith(file_id):
+                    file_path = os.path.join(DOWNLOAD_DIR, f)
+                    break
+
+            if file_path and os.path.exists(file_path):
                 await status_msg.edit_text(UI.UPLOADING, parse_mode=ParseMode.HTML)
                 with open(file_path, 'rb') as f:
-                    # Musiqa tagiga imzo qo'shish
                     caption_text = UI.CAPTION_MUSIC.format(title, BOT_USERNAME)
                     await update.message.reply_audio(
                         audio=f, 
@@ -177,11 +179,13 @@ class ProfessionalDownloader:
 
     def cleanup(self, base):
         try:
+            base_dir = os.path.dirname(base)
             base_name = os.path.basename(base)
-            for f in os.listdir(DOWNLOAD_DIR):
+            for f in os.listdir(base_dir):
                 if f.startswith(base_name):
-                    os.remove(os.path.join(DOWNLOAD_DIR, f))
-        except: pass
+                    os.remove(os.path.join(base_dir, f))
+        except Exception as e:
+            logger.error(f"Cleanup error: {e}")
 
 if __name__ == "__main__":
     if not TOKEN:
