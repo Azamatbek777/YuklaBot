@@ -46,7 +46,7 @@ class UI:
     CAPTION_VIDEO = "🎬 <b>{}</b>\n\n✨ {}: Yuklab beruvchi bot"
     CAPTION_MUSIC = "🎵 <b>{}</b>\n\n✨ {}: Yuklab beruvchi bot"
     
-    ERROR = "❌ <b>Kechirasiz, {}!</b>\n\nUshbu linkdan media yuklab bo'lmadi. Iltimos, linkni tekshiring."
+    ERROR = "❌ <b>Kechirasiz, {}!</b>\n\nXatolik yuz berdi."
     NOT_FOUND = "🔍 <b>Afsuski, hech narsa topilmadi.</b>"
 
 # --- YT-DLP SOZLAMALARI ---
