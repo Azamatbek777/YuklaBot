@@ -4,6 +4,8 @@ import logging
 import traceback
 import yt_dlp
 import uuid
+import threading
+from http.server import HTTPServer, BaseHTTPRequestHandler
 from dotenv import load_dotenv
 from telegram import Update
 from telegram.ext import (
@@ -17,14 +19,15 @@ from telegram.constants import ParseMode
 
 load_dotenv()
 
+# --- SOZLAMALAR ---
 TOKEN = os.getenv("BOT_TOKEN")
 DOWNLOAD_DIR = "downloads"
 BOT_USERNAME = "@GoYuklaBot"
 
 INSTAGRAM_COOKIES = "instagram_cookies.txt"
-YOUTUBE_COOKIES = "youtube_cookies1.txt"
+YOUTUBE_COOKIES = "youtube_cookies.txt"
 
-# Serverda blokirovkadan qochish uchun haqiqiy brauzer User-Agenti
+# Haqiqiy brauzer User-Agenti
 REAL_USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36'
 
 if not os.path.exists(DOWNLOAD_DIR):
@@ -36,7 +39,22 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# --- RENDER UCHUN PORT-SERVER (Bot o'chib qolmasligi uchun) ---
+class HealthCheckHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"Bot is running!")
 
+    def log_message(self, format, *args):
+        return # Loglarni tozalab turadi
+
+def run_health_check():
+    port = int(os.environ.get("PORT", 10000))
+    server = HTTPServer(('0.0.0.0', port), HealthCheckHandler)
+    server.serve_forever()
+
+# --- UI MATNLARI ---
 class UI:
     WELCOME = (
         "<b>👋 Assalomu alaykum, {}!</b>\n\n"
@@ -48,7 +66,7 @@ class UI:
     UPLOADING = "📤 <b>Tayyor!</b>\n✨ Fayl yuborilmoqda..."
     CAPTION_VIDEO = "🎬 <b>{}</b>\n\n✨ {}"
     CAPTION_MUSIC = "🎵 <b>{}</b>\n\n✨ {}"
-    ERROR = "❌ <b>Kechirasiz!</b>\n\nKeyinroq urinib ko‘ring yoki boshqa link/nom sinang."
+    ERROR = "❌ <b>Kechirasiz!</b>\n\nYouTube/Instagram bloklagan bo'lishi mumkin. Keyinroq urinib ko'ring."
     NOT_FOUND = "🔍 <b>Hech narsa topilmadi.</b>"
     MUSIC_RESULTS = (
         "🔍 <b>\"{query}\"</b> bo‘yicha topilgan natijalar:\n\n"
@@ -56,25 +74,24 @@ class UI:
         "🎵 <b>1-10 gacha raqam yozing</b> — shu qo‘shiq yuklanadi!"
     )
 
-
+# --- YT-DLP OPTIMALLASH ---
 def get_ydl_opts(file_base: str, is_audio: bool = False, cookies_file: str = None):
     opts = {
         'outtmpl': f'{file_base}.%(ext)s',
         'quiet': True,
         'no_warnings': True,
-        'ignoreerrors': False, # Xatolarni ko'rish uchun False qildim
-        'retries': 10,
-        'fragment_retries': 10,
-        'user_agent': REAL_USER_AGENT, # Haqiqiy User-Agent qo'shildi
+        'ignoreerrors': False,
+        'retries': 15,
+        'user_agent': REAL_USER_AGENT,
         'geo_bypass': True,
         'noplaylist': True,
-        'socket_timeout': 120,
     }
 
     if cookies_file and os.path.exists(cookies_file):
-        opts['cookiefile'] = cookies_file # 'cookies' emas 'cookiefile' bo'lishi kerak
+        opts['cookiefile'] = cookies_file
 
     if is_audio:
+        # Formatni yanada moslashuvchan qildik
         opts['format'] = 'bestaudio/best'
         opts['postprocessors'] = [{
             'key': 'FFmpegExtractAudio',
@@ -82,12 +99,12 @@ def get_ydl_opts(file_base: str, is_audio: bool = False, cookies_file: str = Non
             'preferredquality': '192',
         }]
     else:
-        opts['format'] = 'bestvideo*[height<=720][ext=mp4]+bestaudio[ext=m4a]/bestvideo*[height<=720]+bestaudio/best'
+        opts['format'] = 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best'
         opts['merge_output_format'] = 'mp4'
 
     return opts
 
-
+# --- ASOSIY BOT ---
 class ProfessionalDownloader:
     def __init__(self):
         self.platforms = ["youtube.com", "youtu.be", "instagram.com", "tiktok.com",
@@ -101,9 +118,7 @@ class ProfessionalDownloader:
 
     async def handle_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         text = (update.message.text or "").strip()
-        if not text:
-            return
-
+        if not text: return
         user_id = update.effective_user.id
 
         if text.isdigit() and f"pending_music_{user_id}" in context.user_data:
@@ -116,115 +131,61 @@ class ProfessionalDownloader:
             await self.youtube_search(update, context, text)
 
     async def youtube_search(self, update: Update, context: ContextTypes.DEFAULT_TYPE, query: str):
-        status_msg = await update.message.reply_text(
-            f"🔍 <b>\"{query}\"</b> qidirilmoqda...",
-            parse_mode=ParseMode.HTML
-        )
-
+        status_msg = await update.message.reply_text(f"🔍 <b>\"{query}\"</b> qidirilmoqda...", parse_mode=ParseMode.HTML)
         try:
             user_id = update.effective_user.id
-            loop = asyncio.get_running_loop()
-            ydl_opts = {
-                'quiet': True,
-                'extract_flat': True,
-                'geo_bypass': True,
-                'noplaylist': True,
-                'user_agent': REAL_USER_AGENT,
-            }
-            if os.path.exists(YOUTUBE_COOKIES):
-                ydl_opts['cookiefile'] = YOUTUBE_COOKIES
+            ydl_opts = {'quiet': True, 'extract_flat': True, 'user_agent': REAL_USER_AGENT}
+            if os.path.exists(YOUTUBE_COOKIES): ydl_opts['cookiefile'] = YOUTUBE_COOKIES
 
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                info = await loop.run_in_executor(
-                    None, lambda: ydl.extract_info(f"ytsearch10:{query}", download=False)
-                )
+                info = await asyncio.get_running_loop().run_in_executor(None, lambda: ydl.extract_info(f"ytsearch10:{query}", download=False))
 
             if not info or 'entries' not in info or not info['entries']:
                 await status_msg.edit_text(UI.NOT_FOUND, parse_mode=ParseMode.HTML)
                 return
 
-            entries = info['entries'][:10]
+            entries = [e for e in info['entries'] if e]
             results_list = []
-            for i, entry in enumerate(entries, 1):
-                title = entry.get('title', 'Noma’lum qo‘shiq')
+            for i, entry in enumerate(entries[:10], 1):
+                title = entry.get('title', 'Noma’lum')
                 uploader = entry.get('uploader', 'Artist')
-                duration = entry.get('duration')
-                dur_str = "??:??"
-                if duration is not None:
-                    try:
-                        dur = int(float(duration))
-                        dur_str = f"{dur//60:02d}:{dur%60:02d}"
-                    except: pass
-                results_list.append(f"<b>{i}.</b> {title}\n👤 {uploader} | ⏱ {dur_str}")
+                results_list.append(f"<b>{i}.</b> {title}\n👤 {uploader}")
 
-            await status_msg.edit_text(
-                UI.MUSIC_RESULTS.format(query=query, results_list="\n\n".join(results_list)),
-                parse_mode=ParseMode.HTML
-            )
+            await status_msg.edit_text(UI.MUSIC_RESULTS.format(query=query, results_list="\n\n".join(results_list)), parse_mode=ParseMode.HTML)
             context.user_data[f"pending_music_{user_id}"] = {'entries': entries}
-
         except Exception as e:
-            logger.error(f"Qidiruv xatosi: {e}")
+            logger.error(f"Search error: {e}")
             await status_msg.edit_text(UI.ERROR, parse_mode=ParseMode.HTML)
 
     async def process_selected_music(self, update: Update, context: ContextTypes.DEFAULT_TYPE, num: int):
         user_id = update.effective_user.id
         data = context.user_data.get(f"pending_music_{user_id}")
         if not data: return
-
         entries = data['entries']
-        if num < 1 or num > len(entries):
-            await update.message.reply_text("❌ Noto‘g‘ri raqam! 1-10 oralig‘ida yozing.")
-            return
+        if num < 1 or num > len(entries): return
 
         selected = entries[num - 1]
         url = selected.get('url') or selected.get('webpage_url')
-        if not url:
-            await update.message.reply_text(UI.ERROR, parse_mode=ParseMode.HTML)
-            return
-
         status_msg = await update.message.reply_text(UI.PROCESSING, parse_mode=ParseMode.HTML)
         file_id = str(uuid.uuid4())
         file_base = os.path.join(DOWNLOAD_DIR, file_id)
 
         try:
-            loop = asyncio.get_running_loop()
-            cookies_file = YOUTUBE_COOKIES if os.path.exists(YOUTUBE_COOKIES) else None
-            ydl_opts = get_ydl_opts(file_base, is_audio=True, cookies_file=cookies_file)
-
+            ydl_opts = get_ydl_opts(file_base, is_audio=True, cookies_file=YOUTUBE_COOKIES if os.path.exists(YOUTUBE_COOKIES) else None)
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                info = await loop.run_in_executor(
-                    None, lambda: ydl.extract_info(url, download=True)
-                )
+                info = await asyncio.get_running_loop().run_in_executor(None, lambda: ydl.extract_info(url, download=True))
 
-            # --- NoneType Ximosi ---
-            if info is None:
-                await status_msg.edit_text("❌ YouTube ma'lumotlarni bermadi. Cookie yangilanishi kerak bo'lishi mumkin.", parse_mode=ParseMode.HTML)
-                return
-
-            title = info.get('title', selected.get('title', 'Musiqa'))[:100]
-            performer = info.get('uploader', 'Artist')[:50]
-
-            file_path = self.find_file(file_id)
-            if file_path:
-                await status_msg.edit_text(UI.UPLOADING, parse_mode=ParseMode.HTML)
-                with open(file_path, 'rb') as f:
-                    await context.bot.send_audio(
-                        chat_id=update.effective_chat.id,
-                        audio=f,
-                        title=title,
-                        performer=performer,
-                        caption=UI.CAPTION_MUSIC.format(title, BOT_USERNAME),
-                        parse_mode=ParseMode.HTML,
-                        read_timeout=120,
-                        write_timeout=120
-                    )
-                await status_msg.delete()
-            else:
-                await status_msg.edit_text(UI.NOT_FOUND, parse_mode=ParseMode.HTML)
-
+            if info:
+                file_path = self.find_file(file_id)
+                if file_path:
+                    await status_msg.edit_text(UI.UPLOADING, parse_mode=ParseMode.HTML)
+                    with open(file_path, 'rb') as f:
+                        await context.bot.send_audio(chat_id=update.effective_chat.id, audio=f, title=info.get('title', 'Musiqa'), performer=info.get('uploader', 'Artist'), caption=f"{info.get('title')}\n\n{BOT_USERNAME}", parse_mode=ParseMode.HTML)
+                    await status_msg.delete()
+                    return
+            await status_msg.edit_text(UI.ERROR, parse_mode=ParseMode.HTML)
         except Exception as e:
-            logger.error(f"Musiqa yuklash xatosi: {e}")
+            logger.error(f"Music download error: {e}")
             await status_msg.edit_text(UI.ERROR, parse_mode=ParseMode.HTML)
         finally:
             self.cleanup(file_id)
@@ -234,80 +195,55 @@ class ProfessionalDownloader:
         status_msg = await update.message.reply_text(UI.PROCESSING, parse_mode=ParseMode.HTML)
         file_id = str(uuid.uuid4())
         file_base = os.path.join(DOWNLOAD_DIR, file_id)
-
-        # YouTube uchun ham cookie tekshiruvi
-        cookies_file = None
-        if "instagram.com" in url.lower():
-            cookies_file = INSTAGRAM_COOKIES
-        elif "youtube.com" in url.lower() or "youtu.be" in url.lower():
-            cookies_file = YOUTUBE_COOKIES
+        
+        cookie = None
+        if "instagram" in url: cookie = INSTAGRAM_COOKIES
+        elif "youtube" in url or "youtu.be" in url: cookie = YOUTUBE_COOKIES
 
         try:
-            loop = asyncio.get_running_loop()
-            ydl_opts = get_ydl_opts(file_base, is_audio=False, cookies_file=cookies_file)
-
+            ydl_opts = get_ydl_opts(file_base, is_audio=False, cookies_file=cookie if os.path.exists(cookie or "") else None)
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                info = await loop.run_in_executor(
-                    None, lambda: ydl.extract_info(url, download=True)
-                )
+                info = await asyncio.get_running_loop().run_in_executor(None, lambda: ydl.extract_info(url, download=True))
 
-            # --- NoneType Ximosi ---
-            if info is None:
-                await status_msg.edit_text("❌ Video ma'lumotlarini olib bo'lmadi.", parse_mode=ParseMode.HTML)
-                return
-
-            title = (info.get('title') or 'Video')[:100]
             file_path = self.find_file(file_id)
-
-            if not file_path:
-                raise Exception("Fayl topilmadi")
-
-            await status_msg.edit_text(UI.UPLOADING, parse_mode=ParseMode.HTML)
-
-            with open(file_path, 'rb') as f:
-                await context.bot.send_video(
-                    chat_id=update.effective_chat.id,
-                    video=f,
-                    caption=UI.CAPTION_VIDEO.format(title, BOT_USERNAME),
-                    parse_mode=ParseMode.HTML,
-                    supports_streaming=True,
-                    read_timeout=120,
-                    write_timeout=120
-                )
-            await status_msg.delete()
-
+            if file_path:
+                await status_msg.edit_text(UI.UPLOADING, parse_mode=ParseMode.HTML)
+                with open(file_path, 'rb') as f:
+                    await context.bot.send_video(chat_id=update.effective_chat.id, video=f, caption=f"🎬 {info.get('title', 'Video')}\n\n{BOT_USERNAME}", parse_mode=ParseMode.HTML)
+                await status_msg.delete()
+            else:
+                await status_msg.edit_text(UI.ERROR, parse_mode=ParseMode.HTML)
         except Exception as e:
-            logger.error(f"Video yuklash xatosi: {e}")
+            logger.error(f"Video download error: {e}")
             await status_msg.edit_text(UI.ERROR, parse_mode=ParseMode.HTML)
         finally:
             self.cleanup(file_id)
 
     def find_file(self, file_id: str):
         for f in os.listdir(DOWNLOAD_DIR):
-            if f.startswith(file_id):
-                return os.path.join(DOWNLOAD_DIR, f)
+            if f.startswith(file_id): return os.path.join(DOWNLOAD_DIR, f)
         return None
 
     def cleanup(self, file_id: str):
         try:
             for f in os.listdir(DOWNLOAD_DIR):
-                if f.startswith(file_id):
-                    os.remove(os.path.join(DOWNLOAD_DIR, f))
+                if f.startswith(file_id): os.remove(os.path.join(DOWNLOAD_DIR, f))
         except: pass
 
-
+# --- ISHGA TUSHIRISH ---
 if __name__ == "__main__":
     if not TOKEN:
         print("❌ BOT_TOKEN topilmadi!")
         exit(1)
 
-    bot = ProfessionalDownloader()
+    # Render uchun soxta serverni alohida oqimda boshlash
+    threading.Thread(target=run_health_check, daemon=True).start()
+
+    bot_logic = ProfessionalDownloader()
     app = ApplicationBuilder().token(TOKEN).build()
 
-    app.add_handler(CommandHandler("start", bot.start))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, bot.handle_message))
+    app.add_handler(CommandHandler("start", bot_logic.start))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, bot_logic.handle_message))
 
-    print("🚀 Bot ishga tushdi!")
-    print(f"YouTube cookies : {'Bor ✓' if os.path.exists(YOUTUBE_COOKIES) else 'Yo‘q'}")
-    
+    print("🚀 Bot Render serverida ishga tushdi!")
     app.run_polling()
