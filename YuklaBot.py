@@ -22,7 +22,7 @@ DOWNLOAD_DIR = "downloads"
 BOT_USERNAME = "@GoYuklaBot"
 
 INSTAGRAM_COOKIES = "instagram_cookies.txt"
-YOUTUBE_COOKIES = "youtube_cookies.txt"
+YOUTUBE_COOKIES = "youtube_cookies1.txt"
 
 # Serverda blokirovkadan qochish uchun haqiqiy brauzer User-Agenti
 REAL_USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36'
