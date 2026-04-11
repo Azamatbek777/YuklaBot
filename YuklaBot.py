@@ -24,6 +24,9 @@ BOT_USERNAME = "@GoYuklaBot"
 INSTAGRAM_COOKIES = "instagram_cookies.txt"
 YOUTUBE_COOKIES = "youtube_cookies.txt"
 
+# Serverda blokirovkadan qochish uchun haqiqiy brauzer User-Agenti
+REAL_USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36'
+
 if not os.path.exists(DOWNLOAD_DIR):
     os.makedirs(DOWNLOAD_DIR)
 
@@ -59,20 +62,19 @@ def get_ydl_opts(file_base: str, is_audio: bool = False, cookies_file: str = Non
         'outtmpl': f'{file_base}.%(ext)s',
         'quiet': True,
         'no_warnings': True,
-        'ignoreerrors': True,
+        'ignoreerrors': False, # Xatolarni ko'rish uchun False qildim
         'retries': 10,
         'fragment_retries': 10,
-        'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+        'user_agent': REAL_USER_AGENT, # Haqiqiy User-Agent qo'shildi
         'geo_bypass': True,
         'noplaylist': True,
         'socket_timeout': 120,
     }
 
     if cookies_file and os.path.exists(cookies_file):
-        opts['cookies'] = cookies_file
+        opts['cookiefile'] = cookies_file # 'cookies' emas 'cookiefile' bo'lishi kerak
 
     if is_audio:
-        # Musiqa → faqat MP3
         opts['format'] = 'bestaudio/best'
         opts['postprocessors'] = [{
             'key': 'FFmpegExtractAudio',
@@ -80,9 +82,8 @@ def get_ydl_opts(file_base: str, is_audio: bool = False, cookies_file: str = Non
             'preferredquality': '192',
         }]
     else:
-        # Video → faqat MP4 (webm chiqmaydi!)
         opts['format'] = 'bestvideo*[height<=720][ext=mp4]+bestaudio[ext=m4a]/bestvideo*[height<=720]+bestaudio/best'
-        opts['merge_output_format'] = 'mp4'          # Bu qator webm → mp4 aylantiradi
+        opts['merge_output_format'] = 'mp4'
 
     return opts
 
@@ -114,7 +115,6 @@ class ProfessionalDownloader:
         else:
             await self.youtube_search(update, context, text)
 
-    # Qidiruv va boshqa funksiyalar o‘zgarmadi (oldingi kod bilan bir xil)
     async def youtube_search(self, update: Update, context: ContextTypes.DEFAULT_TYPE, query: str):
         status_msg = await update.message.reply_text(
             f"🔍 <b>\"{query}\"</b> qidirilmoqda...",
@@ -129,9 +129,10 @@ class ProfessionalDownloader:
                 'extract_flat': True,
                 'geo_bypass': True,
                 'noplaylist': True,
+                'user_agent': REAL_USER_AGENT,
             }
             if os.path.exists(YOUTUBE_COOKIES):
-                ydl_opts['cookies'] = YOUTUBE_COOKIES
+                ydl_opts['cookiefile'] = YOUTUBE_COOKIES
 
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 info = await loop.run_in_executor(
@@ -153,27 +154,23 @@ class ProfessionalDownloader:
                     try:
                         dur = int(float(duration))
                         dur_str = f"{dur//60:02d}:{dur%60:02d}"
-                    except:
-                        pass
+                    except: pass
                 results_list.append(f"<b>{i}.</b> {title}\n👤 {uploader} | ⏱ {dur_str}")
 
             await status_msg.edit_text(
                 UI.MUSIC_RESULTS.format(query=query, results_list="\n\n".join(results_list)),
                 parse_mode=ParseMode.HTML
             )
-
             context.user_data[f"pending_music_{user_id}"] = {'entries': entries}
 
         except Exception as e:
-            logger.error(f"Qidiruv xatosi: {e}\n{traceback.format_exc()}")
+            logger.error(f"Qidiruv xatosi: {e}")
             await status_msg.edit_text(UI.ERROR, parse_mode=ParseMode.HTML)
 
     async def process_selected_music(self, update: Update, context: ContextTypes.DEFAULT_TYPE, num: int):
-        # ... (oldingi kod bilan bir xil, o‘zgartirish yo‘q)
         user_id = update.effective_user.id
         data = context.user_data.get(f"pending_music_{user_id}")
-        if not data:
-            return
+        if not data: return
 
         entries = data['entries']
         if num < 1 or num > len(entries):
@@ -195,9 +192,15 @@ class ProfessionalDownloader:
             cookies_file = YOUTUBE_COOKIES if os.path.exists(YOUTUBE_COOKIES) else None
             ydl_opts = get_ydl_opts(file_base, is_audio=True, cookies_file=cookies_file)
 
-            info = await loop.run_in_executor(
-                None, lambda: yt_dlp.YoutubeDL(ydl_opts).extract_info(url, download=True)
-            )
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                info = await loop.run_in_executor(
+                    None, lambda: ydl.extract_info(url, download=True)
+                )
+
+            # --- NoneType Ximosi ---
+            if info is None:
+                await status_msg.edit_text("❌ YouTube ma'lumotlarni bermadi. Cookie yangilanishi kerak bo'lishi mumkin.", parse_mode=ParseMode.HTML)
+                return
 
             title = info.get('title', selected.get('title', 'Musiqa'))[:100]
             performer = info.get('uploader', 'Artist')[:50]
@@ -221,7 +224,7 @@ class ProfessionalDownloader:
                 await status_msg.edit_text(UI.NOT_FOUND, parse_mode=ParseMode.HTML)
 
         except Exception as e:
-            logger.error(f"Musiqa yuklash xatosi: {e}\n{traceback.format_exc()}")
+            logger.error(f"Musiqa yuklash xatosi: {e}")
             await status_msg.edit_text(UI.ERROR, parse_mode=ParseMode.HTML)
         finally:
             self.cleanup(file_id)
@@ -232,15 +235,26 @@ class ProfessionalDownloader:
         file_id = str(uuid.uuid4())
         file_base = os.path.join(DOWNLOAD_DIR, file_id)
 
-        cookies_file = INSTAGRAM_COOKIES if "instagram.com" in url.lower() else None
+        # YouTube uchun ham cookie tekshiruvi
+        cookies_file = None
+        if "instagram.com" in url.lower():
+            cookies_file = INSTAGRAM_COOKIES
+        elif "youtube.com" in url.lower() or "youtu.be" in url.lower():
+            cookies_file = YOUTUBE_COOKIES
 
         try:
             loop = asyncio.get_running_loop()
             ydl_opts = get_ydl_opts(file_base, is_audio=False, cookies_file=cookies_file)
 
-            info = await loop.run_in_executor(
-                None, lambda: yt_dlp.YoutubeDL(ydl_opts).extract_info(url, download=True)
-            )
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                info = await loop.run_in_executor(
+                    None, lambda: ydl.extract_info(url, download=True)
+                )
+
+            # --- NoneType Ximosi ---
+            if info is None:
+                await status_msg.edit_text("❌ Video ma'lumotlarini olib bo'lmadi.", parse_mode=ParseMode.HTML)
+                return
 
             title = (info.get('title') or 'Video')[:100]
             file_path = self.find_file(file_id)
@@ -263,7 +277,7 @@ class ProfessionalDownloader:
             await status_msg.delete()
 
         except Exception as e:
-            logger.error(f"Video yuklash xatosi: {e}\n{traceback.format_exc()}")
+            logger.error(f"Video yuklash xatosi: {e}")
             await status_msg.edit_text(UI.ERROR, parse_mode=ParseMode.HTML)
         finally:
             self.cleanup(file_id)
@@ -279,18 +293,13 @@ class ProfessionalDownloader:
             for f in os.listdir(DOWNLOAD_DIR):
                 if f.startswith(file_id):
                     os.remove(os.path.join(DOWNLOAD_DIR, f))
-        except:
-            pass
+        except: pass
 
 
 if __name__ == "__main__":
     if not TOKEN:
-        print("❌ BOT_TOKEN topilmadi! .env faylini tekshiring.")
+        print("❌ BOT_TOKEN topilmadi!")
         exit(1)
-
-    print("🚀 Bot muvaffaqiyatli ishga tushdi!")
-    print(f"Instagram cookies: {'Bor ✓' if os.path.exists(INSTAGRAM_COOKIES) else 'Yo‘q'}")
-    print(f"YouTube cookies  : {'Bor ✓' if os.path.exists(YOUTUBE_COOKIES) else 'Yo‘q'}")
 
     bot = ProfessionalDownloader()
     app = ApplicationBuilder().token(TOKEN).build()
@@ -298,5 +307,7 @@ if __name__ == "__main__":
     app.add_handler(CommandHandler("start", bot.start))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, bot.handle_message))
 
-    print("👉 Bot polling rejimida ishlamoqda...")
+    print("🚀 Bot ishga tushdi!")
+    print(f"YouTube cookies : {'Bor ✓' if os.path.exists(YOUTUBE_COOKIES) else 'Yo‘q'}")
+    
     app.run_polling()
